@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ALLOWLIST_FILE="approvers/ALLOWLIST.txt"
+REQUIRED_APPROVALS="${REQUIRED_APPROVALS:-1}"
+
+is_approved() {
+  local sha="$1"
+  local ok=0
+
+  [[ -f "$ALLOWLIST_FILE" ]] || { echo 0; return; }
+
+  # Get all approval tags for this SHA
+  mapfile -t tags < <(git tag -l "approve/${sha}/*" || true)
+  if [[ ${#tags[@]} -eq 0 ]]; then echo 0; return; fi
+
+  # Read allow-list; strip Windows CRs; skip blanks/comments
+  while IFS= read -r email || [[ -n "${email-}" ]]; do
+    # remove trailing CR if file has CRLF endings
+    email="${email%$'\r'}"
+    [[ -z "$email" || "$email" =~ ^[[:space:]]*# ]] && continue
+
+    local t="approve/${sha}/${email}"
+    if git rev-parse -q --verify "refs/tags/$t" >/dev/null 2>&1; then
+      if git verify-tag "$t" >/dev/null 2>&1; then
+        ok=$((ok+1))
+      fi
+    fi
+  done < "$ALLOWLIST_FILE"
+
+  if (( ok >= REQUIRED_APPROVALS )); then echo 1; else echo 0; fi
+}
+
+blocked=0
+# stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ "$remote_ref" == "refs/heads/main" ]]; then
+    if [[ "$(is_approved "$local_sha")" -ne 1 ]]; then
+      echo "Push to main blocked: missing valid approvals for $local_sha"
+      echo "Use tools/approve-and-merge.ps1 (or .sh) to merge after approvals."
+      blocked=1
+    fi
+  fi
+done
+
+exit $blocked
